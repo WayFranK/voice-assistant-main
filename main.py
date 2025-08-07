@@ -18,14 +18,24 @@ import pyautogui
 import glob
 
 # Настройка логирования для системы исправления ошибок
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('soika_errors.log'),
-        logging.StreamHandler()
-    ]
-)
+try:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('soika_errors.log'),
+            logging.StreamHandler()
+        ]
+    )
+except Exception as e:
+    # Если не удается создать файл логов, используем только консоль
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler()]
+    )
+    print(f"Предупреждение: Не удалось создать файл логов: {e}")
+
 logger = logging.getLogger(__name__)
 
 # Глобальные переменные для состояния системы
@@ -43,25 +53,33 @@ system_state = {
     'monitor_window': None
 }
 
-MONITOR_DIR = Path(r'D:/voice-assistant-main/voice-assistant-main/screen_monitor')
-MONITOR_DIR.mkdir(exist_ok=True)
+MONITOR_DIR = Path('./screen_monitor')
+try:
+    MONITOR_DIR.mkdir(exist_ok=True)
+except Exception as e:
+    logger.error(f"Ошибка создания директории мониторинга: {e}")
+    # Создаем директорию в текущей папке пользователя как запасной вариант
+    MONITOR_DIR = Path.home() / 'soika_screen_monitor'
+    MONITOR_DIR.mkdir(exist_ok=True)
 MAX_SCREENSHOTS = 100
 MONITOR_INTERVAL = 2  # секунды
 
 # --- Фоновая очистка памяти раз в минуту ---
 def background_clear_memory():
     while True:
-        time.sleep(60)
         try:
+            time.sleep(60)
             clear_memory()
         except Exception as e:
             logger.error(f"Ошибка фоновой очистки памяти: {e}")
+        except KeyboardInterrupt:
+            break
 
 def background_check_memory():
     warned = False
     while True:
-        time.sleep(30)
         try:
+            time.sleep(30)
             mem = psutil.virtual_memory()
             if mem.percent >= 80 and not warned:
                 speak(f"Внимание! Использование оперативной памяти {mem.percent} процентов.")
@@ -70,25 +88,42 @@ def background_check_memory():
                 warned = False
         except Exception as e:
             logger.error(f"Ошибка проверки памяти: {e}")
+        except KeyboardInterrupt:
+            break
 
 # --- Мониторинг экрана ---
 def _clear_old_screenshots():
-    files = sorted(MONITOR_DIR.glob('*.png'), key=os.path.getmtime)
-    while len(files) > MAX_SCREENSHOTS:
-        try:
-            os.remove(files[0])
-            files.pop(0)
-        except Exception as e:
-            logger.error(f"Ошибка удаления скриншота: {e}")
-            break
+    try:
+        # Проверяем, что директория существует
+        if not MONITOR_DIR.exists():
+            return
+            
+        files = sorted(MONITOR_DIR.glob('*.png'), key=os.path.getmtime)
+        while len(files) > MAX_SCREENSHOTS:
+            try:
+                os.remove(files[0])
+                files.pop(0)
+            except Exception as e:
+                logger.error(f"Ошибка удаления скриншота: {e}")
+                break
+    except Exception as e:
+        logger.error(f"Ошибка при очистке старых скриншотов: {e}")
 
 def _take_screenshot():
-    img = pyautogui.screenshot()
-    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    path = MONITOR_DIR / f'screen_{ts}.png'
-    img.save(path)
-    _clear_old_screenshots()
-    return path
+    try:
+        # Проверяем, что директория существует
+        if not MONITOR_DIR.exists():
+            MONITOR_DIR.mkdir(exist_ok=True)
+            
+        img = pyautogui.screenshot()
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        path = MONITOR_DIR / f'screen_{ts}.png'
+        img.save(path)
+        _clear_old_screenshots()
+        return path
+    except Exception as e:
+        logger.error(f"Ошибка при создании скриншота: {e}")
+        return None
 
 class ScreenMonitorWindow:
     def __init__(self, root):
@@ -99,22 +134,35 @@ class ScreenMonitorWindow:
         self.update_image()
 
     def update_image(self):
-        path = _take_screenshot()
-        img = Image.open(path)
-        img = img.resize((800, 450))
-        self.photo = ImageTk.PhotoImage(img)
-        self.label.config(image=self.photo)
-        self.root.after(MONITOR_INTERVAL * 1000, self.update_image)
+        try:
+            path = _take_screenshot()
+            if path is None:
+                self.root.after(MONITOR_INTERVAL * 1000, self.update_image)
+                return
+                
+            img = Image.open(path)
+            img = img.resize((800, 450))
+            self.photo = ImageTk.PhotoImage(img)
+            self.label.config(image=self.photo)
+            self.root.after(MONITOR_INTERVAL * 1000, self.update_image)
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении изображения: {e}")
+            self.root.after(MONITOR_INTERVAL * 1000, self.update_image)
 
 _monitor_window_thread = None
 
 def _start_screen_monitor():
     def run_window():
-        root = tk.Tk()
-        system_state['monitor_window'] = root
-        win = ScreenMonitorWindow(root)
-        root.protocol("WM_DELETE_WINDOW", lambda: _stop_screen_monitor())
-        root.mainloop()
+        try:
+            root = tk.Tk()
+            system_state['monitor_window'] = root
+            win = ScreenMonitorWindow(root)
+            root.protocol("WM_DELETE_WINDOW", lambda: _stop_screen_monitor())
+            root.mainloop()
+        except Exception as e:
+            logger.error(f"Ошибка при запуске мониторинга экрана: {e}")
+            system_state['monitoring_enabled'] = False
+            
     global _monitor_window_thread
     if _monitor_window_thread and _monitor_window_thread.is_alive():
         return
@@ -127,18 +175,31 @@ def _stop_screen_monitor():
     win = system_state.get('monitor_window')
     if win:
         try:
+            win.quit()  # Безопасное закрытие tkinter окна
             win.destroy()
-        except Exception:
-            pass
-        system_state['monitor_window'] = None
+        except Exception as e:
+            logger.error(f"Ошибка при закрытии окна мониторинга: {e}")
+        finally:
+            system_state['monitor_window'] = None
     speak('Мониторинг экрана выключен.')
 
 # Настройка голосового синтезатора
-engine = pyttsx3.init()
-engine.setProperty('rate', 150)
-engine.setProperty('volume', 0.9)
+try:
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 150)
+    engine.setProperty('volume', 0.9)
+except Exception as e:
+    logger.error(f"Ошибка инициализации голосового синтезатора: {e}")
+    engine = None
 
 def speak(text):
+    if not text or text.strip() == "":
+        return
+        
+    if engine is None:
+        print(f"Soika: {text}")
+        return
+        
     try:
         engine.say(text)
         engine.runAndWait()
@@ -159,13 +220,18 @@ def error_handler(func):
 
 @error_handler
 def listen_command():
-    recognizer = sr.Recognizer()
     try:
+        recognizer = sr.Recognizer()
         with sr.Microphone() as source:
             print("Soika слушает...")
             recognizer.adjust_for_ambient_noise(source, duration=0.5)
             audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
         command = recognizer.recognize_google(audio, language="ru-RU")
+        
+        if not command or command.strip() == "":
+            speak("Я не поняла вашу команду, Soika.")
+            return ""
+            
         print(f"Вы сказали: {command}")
         logger.info(f"Распознана команда: {command}")
         return command.lower()
@@ -181,11 +247,25 @@ def listen_command():
 
 # --- Вспомогательные функции ---
 def _toggle_state(key, msg):
+    if not key or key.strip() == "":
+        speak("Ошибка: не указан ключ состояния.")
+        return
+        
+    if not msg or msg.strip() == "":
+        speak("Ошибка: не указано сообщение.")
+        return
+        
     system_state[key] = not system_state[key]
     status = "включен" if system_state[key] else "выключен"
     speak(f"{msg} {status}.")
 
 def _get_status(key, msg):
+    if not key or key.strip() == "":
+        return None
+        
+    if not msg or msg.strip() == "":
+        return None
+        
     if system_state[key]:
         return msg
     return None
@@ -215,7 +295,8 @@ def clear_memory():
             if proc.info['name'] in ['chrome.exe', 'firefox.exe', 'msedge.exe']:
                 try: proc.kill()
                 except: pass
-        os.system("echo 1 > /proc/sys/vm/drop_caches")  # Для Linux
+        # Очистка кэша для Windows
+        os.system("ipconfig /flushdns")
         speak("Память очищена, фоновые процессы закрыты.")
     except Exception as e:
         logger.error(f"Ошибка при очистке памяти: {e}")
@@ -234,7 +315,12 @@ def open_explorer():
 @error_handler
 def create_folder(folder_name):
     try:
-        Path(folder_name).mkdir(exist_ok=True)
+        if not folder_name or folder_name.strip() == "":
+            speak("Пожалуйста, укажите название папки.")
+            return
+            
+        folder_path = Path(folder_name)
+        folder_path.mkdir(exist_ok=True)
         speak(f"Папка {folder_name} создана.")
     except Exception as e:
         logger.error(f"Ошибка создания папки: {e}")
@@ -243,6 +329,10 @@ def create_folder(folder_name):
 # --- Интернет и браузер ---
 @error_handler
 def open_website(site_name):
+    if not site_name or site_name.strip() == "":
+        speak("Пожалуйста, укажите название сайта.")
+        return
+        
     sites = {
         'google': 'https://www.google.com',
         'яндекс': 'https://www.yandex.ru',
@@ -256,16 +346,28 @@ def open_website(site_name):
 
 @error_handler
 def search_web(query):
+    if not query or query.strip() == "":
+        speak("Пожалуйста, укажите что искать.")
+        return
+        
     webbrowser.open(f"https://www.google.com/search?q={quote(query)}")
     speak(f"Ищу {query} в интернете.")
 
 @error_handler
 def translate_text(text):
+    if not text or text.strip() == "":
+        speak("Пожалуйста, укажите текст для перевода.")
+        return
+        
     webbrowser.open(f"https://translate.google.com/?sl=ru&tl=en&text={quote(text)}")
     speak(f"Перевожу '{text}' на английский.")
 
 @error_handler
 def search_images(query):
+    if not query or query.strip() == "":
+        speak("Пожалуйста, укажите что искать.")
+        return
+        
     webbrowser.open(f"https://www.google.com/search?q={quote(query)}&tbm=isch")
     speak(f"Ищу изображения по запросу {query}.")
 
@@ -273,6 +375,10 @@ def search_images(query):
 @error_handler
 def search_file(filename):
     try:
+        if not filename or filename.strip() == "":
+            speak("Пожалуйста, укажите название файла для поиска.")
+            return
+            
         result = subprocess.run(['where', filename], capture_output=True, text=True)
         if result.returncode == 0:
             speak(f"Файл {filename} найден.")
@@ -286,6 +392,15 @@ def search_file(filename):
 @error_handler
 def open_folder(folder_name):
     try:
+        if not folder_name or folder_name.strip() == "":
+            speak("Пожалуйста, укажите название папки.")
+            return
+            
+        folder_path = Path(folder_name)
+        if not folder_path.exists():
+            speak(f"Папка {folder_name} не существует.")
+            return
+            
         os.system(f'explorer "{folder_name}"')
         speak(f"Открываю папку {folder_name}.")
     except Exception as e:
@@ -295,6 +410,10 @@ def open_folder(folder_name):
 # --- Мультимедиа ---
 @error_handler
 def control_music(action):
+    if not action or action.strip() == "":
+        speak("Пожалуйста, укажите действие для управления музыкой.")
+        return
+        
     actions = {
         'play':   ("start wmplayer", "Включаю проигрыватель Windows Media."),
         'pause':  ("powershell (New-Object -ComObject WScript.Shell).SendKeys([char]179)", "Ставлю музыку на паузу."),
@@ -306,6 +425,8 @@ def control_music(action):
     if cmd:
         os.system(cmd)
         speak(msg)
+    else:
+        speak("Неизвестное действие для управления музыкой.")
 
 # --- Разное ---
 @error_handler
@@ -323,11 +444,23 @@ def get_weather():
 
 @error_handler
 def add_reminder(text, time_str):
+    if not text or text.strip() == "":
+        speak("Пожалуйста, укажите текст напоминания.")
+        return
+        
+    if not time_str or time_str.strip() == "":
+        speak("Пожалуйста, укажите время напоминания.")
+        return
+        
     system_state['reminders'].append({'text': text, 'time': time_str, 'created': datetime.datetime.now().isoformat()})
     speak(f"Напоминание '{text}' на {time_str} добавлено.")
 
 @error_handler
 def add_note(text):
+    if not text or text.strip() == "":
+        speak("Пожалуйста, укажите текст заметки.")
+        return
+        
     system_state['notes'].append({'text': text, 'timestamp': datetime.datetime.now().isoformat()})
     speak(f"Заметка '{text}' добавлена.")
 
@@ -343,7 +476,15 @@ def read_notes():
 @error_handler
 def set_timer(duration):
     try:
+        if not duration or duration.strip() == "":
+            speak("Пожалуйста, укажите время для таймера.")
+            return
+            
         minutes = int(duration)
+        if minutes <= 0:
+            speak("Время таймера должно быть больше нуля.")
+            return
+            
         timer_id = f"timer_{len(system_state['timers'])}"
         system_state['timers'][timer_id] = {
             'duration': minutes,
@@ -362,11 +503,34 @@ def set_timer(duration):
 @error_handler
 def set_alarm(time_str):
     try:
+        # Парсинг времени (формат: HH:MM)
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("Неверный формат времени")
+        except ValueError:
+            speak("Пожалуйста, укажите время в формате ЧЧ:ММ (например, 08:30)")
+            return
+            
         alarm_id = f"alarm_{len(system_state['alarms'])}"
         system_state['alarms'][alarm_id] = {
             'time': time_str,
+            'hour': hour,
+            'minute': minute,
             'created': datetime.datetime.now().isoformat()
         }
+        
+        # Запуск фонового потока для проверки будильника
+        def alarm_checker():
+            while True:
+                now = datetime.datetime.now()
+                if now.hour == hour and now.minute == minute:
+                    speak(f"Будильник! Время {time_str}")
+                    system_state['alarms'].pop(alarm_id, None)
+                    break
+                time.sleep(30)  # Проверка каждые 30 секунд
+        
+        threading.Thread(target=alarm_checker, daemon=True).start()
         speak(f"Будильник на {time_str} установлен.")
     except Exception as e:
         logger.error(f"Ошибка установки будильника: {e}")
@@ -392,6 +556,10 @@ def toggle_learning_mode():
 
 @error_handler
 def adapt_to_game(game_name):
+    if not game_name or game_name.strip() == "":
+        speak("Пожалуйста, укажите название игры.")
+        return
+        
     system_state['current_game'] = game_name
     speak(f"Адаптируюсь к игре {game_name}.")
 
@@ -453,6 +621,10 @@ def show_background_processes():
 # --- Основная функция обработки команд ---
 @error_handler
 def process_command(command):
+    if not command or command.strip() == "":
+        speak("Я не получила команду для обработки.")
+        return
+        
     # Системные команды
     if any(phrase in command for phrase in ['заверши работу компьютера', 'выключи компьютер', 'выключи пк']):
         shutdown_computer()
@@ -559,21 +731,29 @@ def process_command(command):
         speak("Я не знаю, как выполнить эту команду. Попробуйте сказать 'что ты можешь' для списка команд.")
 
 if __name__ == "__main__":
-    logger.info("Soika запущена")
-    speak("Привет! Я Soika, ваш голосовой помощник. Как я могу помочь?")
-    # Запуск фоновых потоков
-    threading.Thread(target=background_clear_memory, daemon=True).start()
-    threading.Thread(target=background_check_memory, daemon=True).start()
-    while True:
-        try:
-            command = listen_command()
-            if command:
-                process_command(command)
-        except KeyboardInterrupt:
-            logger.info("Soika остановлена пользователем")
-            speak("До свидания!")
-            break
-        except Exception as e:
-            logger.error(f"Критическая ошибка: {e}")
-            speak("Произошла критическая ошибка. Перезапускаюсь...")
-            time.sleep(2)
+    try:
+        logger.info("Soika запущена")
+        speak("Привет! Я Soika, ваш голосовой помощник. Как я могу помочь?")
+        # Запуск фоновых потоков
+        threading.Thread(target=background_clear_memory, daemon=True).start()
+        threading.Thread(target=background_check_memory, daemon=True).start()
+        while True:
+            try:
+                command = listen_command()
+                if command:
+                    process_command(command)
+            except KeyboardInterrupt:
+                logger.info("Soika остановлена пользователем")
+                speak("До свидания!")
+                break
+            except Exception as e:
+                logger.error(f"Критическая ошибка: {e}")
+                speak("Произошла критическая ошибка. Перезапускаюсь...")
+                time.sleep(2)
+            except SystemExit:
+                logger.info("Soika завершена системой")
+                speak("До свидания!")
+                break
+    except Exception as e:
+        print(f"Критическая ошибка при запуске Soika: {e}")
+        logger.error(f"Критическая ошибка при запуске: {e}")
